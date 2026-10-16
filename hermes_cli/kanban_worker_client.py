@@ -52,7 +52,44 @@ async def _submit_claim(client, params, board_db):
     # The attempt's reply ends the log, as a one-shot worker's did: crash diagnostics quote it.
     if result.get('last_output'):
         print(result['last_output'])
-    return result.get('exit_code', 1)
+    exit_code = result.get('exit_code', 1)
+    # A clean exit (rc=0) while the task is still ``running`` means the agent
+    # finished its work without calling kanban_complete / kanban_block /
+    # kanban_request_review. Instead of leaving the card in the dispatcher's
+    # protocol-violation path (which burns retry budget and trips the breaker),
+    # block it here with a human-readable reason so an operator can review.
+    if exit_code == 0:
+        _block_if_still_running(board_db, params)
+    return exit_code
+
+
+def _block_if_still_running(board_db, params):
+    """Block a task that the agent finished without a terminal kanban call.
+
+    Only acts when the task is still ``running`` (the happy path: the agent
+    called kanban_complete and the claim was already released). Safe to call
+    speculatively — a non-running task is a no-op.
+    """
+    from hermes_cli.kanban_db import get_task, block_task
+    from hermes_cli.kanban_db_connect import connect_closing
+    try:
+        with connect_closing(Path(board_db)) as conn:
+            task = get_task(conn, params['task_id'])
+            if task and task.status == 'running':
+                block_task(
+                    conn, params['task_id'],
+                    reason=(
+                        'Worker exited cleanly (rc=0) without calling '
+                        'kanban_complete, kanban_block, or '
+                        'kanban_request_review. The agent work may be '
+                        'complete; verify the result and close the task '
+                        'explicitly, then unblock to retry as needed.'
+                    ),
+                    expected_run_id=params['run_id'],
+                )
+    except Exception:
+        # Best-effort: never let the block attempt itself crash the exit.
+        pass
 
 
 def main():
