@@ -1694,6 +1694,7 @@ def run_kanban_goal_loop(
                 reset_affinity_scope(affinity_token)
         if _transport_failed:
             _log(f"kanban goal loop: judge transport failed on turn {turns_used}; stopping")
+            _block(f"Goal-mode worker: judge transport failure on turn {turns_used}")
             return _result("stopped", "judge transport failure")
         if verdict == "wait":
             verdict = "continue"
@@ -1748,6 +1749,7 @@ def run_kanban_goal_loop(
             return _result("stopped", f"run_turn error: {type(exc).__name__}")
         if failed:
             _log(f"kanban goal loop: worker failed on turn {turns_used} (reason={failure_reason}); stopping")
+            _block(f"Goal-mode worker: worker reported failure on turn {turns_used} — {failure_reason}")
             return _result("stopped", f"worker failed: {failure_reason}")
         turns_used += 1
 
