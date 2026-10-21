@@ -177,7 +177,7 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
             with kb.write_txn(conn):
                 conn.execute("UPDATE tasks SET status='running' WHERE id=?", (child,))
         assert kb.block_task(conn, child, reason="wait", kind="dependency")
-        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        kbd.dispatch_once(conn, spawn_fn=fake_spawn)
         assert kb.get_task(conn, child).status == "todo"
         assert child not in spawns
         with kb.write_txn(conn):
@@ -198,3 +198,32 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 
 
+def test_block_task_transitions_scheduled(kanban_home: Path) -> None:
+    """``block_task`` must transition a ``scheduled`` task to ``blocked``.
+
+    Regression test: the backup watchdog calls ``block`` on parked/scheduled
+    tasks to break crash loops, but ``block_task``'s UPDATE only matched
+    ``running``/``ready`` — scheduling a task made it un-blockable, so the
+    watchdog fell through to "cannot block {tid}" and could not break the
+    dispatch-crash loop.  After the fix, ``scheduled`` is an accepted source
+    status and ``source_status`` in the event payload reflects the real prior
+    state instead of a hardcoded ``"ready"``.
+    """
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="scheduled-task", assignee="worker")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='scheduled', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+                (tid,),
+            )
+        # Before the fix this returned False and printed "cannot block"
+        assert kb.block_task(conn, tid, reason="break crash loop")
+        parked = kb.get_task(conn, tid)
+        assert parked is not None
+        assert parked.status == "blocked"
+        # source_status must reflect the actual prior state, not hardcoded "ready"
+        events = [e for e in kb.list_events(conn, tid) if e.kind == "blocked"]
+        assert events
+        payload = events[-1].payload or {}
+        assert payload.get("source_status") == "scheduled"
